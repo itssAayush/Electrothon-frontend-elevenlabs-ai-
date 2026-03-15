@@ -18,7 +18,7 @@ const productLinks = [
   },
   {
     label: "Experience MedConnect",
-    href: "/auth",
+    href: "/app",
   },
 ];
 
@@ -33,7 +33,7 @@ const solutionLinks = [
   },
   {
     label: "AI care assistant",
-    href: "/auth",
+    href: "/app",
   },
 ];
 
@@ -116,7 +116,7 @@ export default function Footer() {
                 enterprise@medconnect.ai
               </a>
               <Link
-                href="/auth"
+                href="/app"
                 className="inline-flex items-center gap-2 rounded-full border border-[#e5dfd5] bg-white/75 px-4 py-2 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
               >
                 Open live experience

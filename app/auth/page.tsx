@@ -1,6 +1,5 @@
 "use client";
 
-import { DirectChat } from "@/components/direct-chat";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/use-toast";
@@ -9,13 +8,17 @@ import { SignIn, SignUp, useUser } from "@clerk/nextjs";
 import {
   ArrowLeft,
   Bot,
+  Loader2,
   Mic,
   RefreshCcw,
   Send,
+  Square,
   Sparkles,
   Stethoscope,
+  Volume2,
 } from "lucide-react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { useEffect, useRef, useState } from "react";
 import remarkGfm from "remark-gfm";
@@ -42,6 +45,9 @@ const navActionClass =
 const navAccentClass =
   "text-sm font-medium text-[#2748b7] hover:bg-[#e5ecff]";
 
+const VOICE_ASSISTANT_ENABLED =
+  process.env.ENABLE_VOICE_ASSISTANT === "true";
+
 const LoadingSkeleton = () => (
   <div className="flex gap-3">
     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#eef2ff]">
@@ -62,23 +68,126 @@ function getWelcomeMessage(name?: string | null) {
   };
 }
 
+function getSessionStorageKey(userId: string) {
+  return `medconnect-chat-session:${userId}`;
+}
+
+function isMessage(value: unknown): value is Message {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as {
+    role?: unknown;
+    content?: unknown;
+    source?: unknown;
+  };
+
+  return (
+    (candidate.role === "user" || candidate.role === "bot") &&
+    typeof candidate.content === "string" &&
+    (candidate.source === undefined ||
+      candidate.source === "database" ||
+      candidate.source === "gemini" ||
+      candidate.source === "escalated" ||
+      candidate.source === "staff" ||
+      candidate.source === "system")
+  );
+}
+
+function parseStoredSession(rawValue: string | null) {
+  if (!rawValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as unknown;
+
+    if (Array.isArray(parsed)) {
+      const messages = parsed.filter(isMessage);
+      return messages.length > 0
+        ? {
+            messages,
+            input: "",
+          }
+        : null;
+    }
+
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+
+    const candidate = parsed as {
+      messages?: unknown;
+      input?: unknown;
+    };
+
+    if (!Array.isArray(candidate.messages)) {
+      return null;
+    }
+
+    const messages = candidate.messages.filter(isMessage);
+
+    return messages.length > 0
+      ? {
+          messages,
+          input: typeof candidate.input === "string" ? candidate.input : "",
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const { user, isLoaded } = useUser();
+  const pathname = usePathname();
+  const router = useRouter();
   const [authMode, setAuthMode] = useState<"signIn" | "signUp">("signIn");
   const [messages, setMessages] = useState<Message[]>([
     getWelcomeMessage("there"),
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [showDirectChat, setShowDirectChat] = useState(false);
-  const [pendingQuestion, setPendingQuestion] = useState("");
+  const [loadingAudioId, setLoadingAudioId] = useState<number | null>(null);
+  const [playingAudioId, setPlayingAudioId] = useState<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const activeUserId = user?.id;
 
   useEffect(() => {
-    if (user) {
-      setMessages([getWelcomeMessage(user.firstName || user.username)]);
+    if (!isLoaded || !activeUserId) {
+      return;
     }
-  }, [user]);
+
+    const storedSession = parseStoredSession(
+      window.sessionStorage.getItem(getSessionStorageKey(activeUserId))
+    );
+
+    if (storedSession) {
+      setMessages(storedSession.messages);
+      setInput(storedSession.input);
+      return;
+    }
+
+    setMessages([getWelcomeMessage(user?.firstName || user?.username)]);
+    setInput("");
+  }, [activeUserId, isLoaded, user?.firstName, user?.username]);
+
+  useEffect(() => {
+    if (!activeUserId) {
+      return;
+    }
+
+    window.sessionStorage.setItem(
+      getSessionStorageKey(activeUserId),
+      JSON.stringify({
+        messages,
+        input,
+      })
+    );
+  }, [activeUserId, input, messages]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -87,11 +196,124 @@ export default function Home() {
   const getInitial = (name: string | null | undefined) =>
     ((name || "U").charAt(0) || "U").toUpperCase();
 
+  const stopAudioPlayback = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+
+    setPlayingAudioId(null);
+  };
+
+  useEffect(() => () => stopAudioPlayback(), []);
+
+  const getSpeechText = (content: string) =>
+    content
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+      .replace(/[`*_>#-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const handleListen = async (messageId: number, content: string) => {
+    if (!VOICE_ASSISTANT_ENABLED) {
+      return;
+    }
+
+    if (playingAudioId === messageId) {
+      stopAudioPlayback();
+      return;
+    }
+
+    stopAudioPlayback();
+    setLoadingAudioId(messageId);
+
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: getSpeechText(content) }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response
+          .json()
+          .catch(() => ({ error: "Failed to generate audio." }));
+        throw new Error(errorBody.error || "Failed to generate audio.");
+      }
+
+      const audioBlob = await response.blob();
+
+      if (!audioBlob.size) {
+        throw new Error("No audio was returned.");
+      }
+
+      const objectUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(objectUrl);
+
+      audioRef.current = audio;
+      audioUrlRef.current = objectUrl;
+
+      audio.onended = () => {
+        if (audioRef.current === audio) {
+          audioRef.current = null;
+        }
+
+        if (audioUrlRef.current === objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          audioUrlRef.current = null;
+        }
+
+        setPlayingAudioId(null);
+      };
+
+      audio.onerror = () => {
+        stopAudioPlayback();
+        toast({
+          title: "Audio playback failed",
+          description: "Unable to play the generated speech.",
+          variant: "destructive",
+        });
+      };
+
+      await audio.play();
+      setPlayingAudioId(messageId);
+    } catch (error) {
+      toast({
+        title: "Voice assistant unavailable",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Failed to generate speech.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingAudioId((current) => (current === messageId ? null : current));
+    }
+  };
+
   const resetConversation = () => {
-    setMessages([getWelcomeMessage(user?.firstName || user?.username)]);
+    stopAudioPlayback();
+    const nextMessages = [getWelcomeMessage(user?.firstName || user?.username)];
+    setMessages(nextMessages);
     setInput("");
-    setPendingQuestion("");
-    setShowDirectChat(false);
+
+    if (activeUserId) {
+      window.sessionStorage.setItem(
+        getSessionStorageKey(activeUserId),
+        JSON.stringify({
+          messages: nextMessages,
+          input: "",
+        })
+      );
+    }
   };
 
   const sendMessage = async () => {
@@ -144,18 +366,6 @@ export default function Home() {
           source: data.source,
         },
       ]);
-
-      if (data.source === "gemini") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "bot",
-            content: "Would you like to chat with our support staff?",
-            source: "system",
-          },
-        ]);
-        setPendingQuestion(userMessage);
-      }
     } catch (error) {
       console.error("Chat error:", error);
       setMessages((prev) => [
@@ -182,24 +392,25 @@ export default function Home() {
     setInput(prompt);
   };
 
-  const startSupportChat = async () => {
-    if (!user) {
-      toast({
-        title: "Error",
-        description: "Please login to chat with support.",
-        variant: "destructive",
-      });
+  const studioIntro =
+    messages.length === 1 && messages[0]?.role === "bot" && !isLoading;
+
+  useEffect(() => {
+    if (pathname !== "/auth") {
       return;
     }
 
-    toast({
-      title: "Notice",
-      description: "Support chat migration to Firebase is in progress.",
-    });
-  };
+    const queryString = window.location.search;
+    router.replace(queryString ? `/app${queryString}` : "/app");
+  }, [pathname, router]);
 
-  const studioIntro =
-    messages.length === 1 && messages[0]?.role === "bot" && !isLoading;
+  if (pathname === "/auth") {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-[#f7f6f2] px-4">
+        <LoadingSkeleton />
+      </div>
+    );
+  }
 
   if (!isLoaded) {
     return (
@@ -407,92 +618,119 @@ export default function Home() {
           ) : (
             <div className="h-full overflow-y-auto pb-4">
               <div className="mx-auto max-w-4xl space-y-5 pb-24">
-                {messages.map((message, index) => (
-                  <div
-                    key={index}
-                    className={cn(
-                      "flex gap-3",
-                      message.role === "user" && "justify-end"
-                    )}
-                  >
-                    {message.role === "bot" ? (
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#4660d2]">
-                        <Bot className="h-5 w-5" />
-                      </div>
-                    ) : null}
+                {messages.map((message, index) => {
+                  const isAudioLoading = loadingAudioId === index;
+                  const isAudioPlaying = playingAudioId === index;
 
+                  return (
                     <div
+                      key={index}
                       className={cn(
-                        "max-w-[85%] rounded-[1.7rem] border px-5 py-4 shadow-sm",
-                        message.role === "bot"
-                          ? "border-[#e8e1d7] bg-white text-slate-700"
-                          : "border-[#d9e4ff] bg-[#eef3ff] text-slate-950"
+                        "flex gap-3",
+                        message.role === "user" && "justify-end"
                       )}
                     >
                       {message.role === "bot" ? (
-                        <div className="prose prose-sm max-w-none prose-p:leading-7 prose-pre:rounded-2xl prose-pre:bg-[#f7f6f2] prose-pre:p-4 prose-code:text-sm">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              p: ({ children }) => (
-                                <p className="mb-2 last:mb-0">{children}</p>
-                              ),
-                              table: ({ children }) => (
-                                <div className="my-2 overflow-auto">
-                                  <table className="w-full border-collapse rounded-xl border border-[#e6dfd6] text-sm">
-                                    {children}
-                                  </table>
-                                </div>
-                              ),
-                              th: ({ children }) => (
-                                <th className="border border-[#e6dfd6] bg-[#faf8f4] px-3 py-2 text-left">
-                                  {children}
-                                </th>
-                              ),
-                              td: ({ children }) => (
-                                <td className="border border-[#e6dfd6] px-3 py-2">
-                                  {children}
-                                </td>
-                              ),
-                            }}
-                          >
-                            {message.content}
-                          </ReactMarkdown>
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#4660d2]">
+                          <Bot className="h-5 w-5" />
                         </div>
-                      ) : (
-                        <p className="text-sm leading-7">{message.content}</p>
-                      )}
+                      ) : null}
 
-                      {message.source ? (
-                        <div className="mt-3 text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
-                          Source: {message.source}
+                      <div
+                        className={cn(
+                          "max-w-[85%] rounded-[1.7rem] border px-5 py-4 shadow-sm",
+                          message.role === "bot"
+                            ? "border-[#e8e1d7] bg-white text-slate-700"
+                            : "border-[#d9e4ff] bg-[#eef3ff] text-slate-950"
+                        )}
+                      >
+                        {message.role === "bot" ? (
+                          <div className="prose prose-sm max-w-none prose-p:leading-7 prose-pre:rounded-2xl prose-pre:bg-[#f7f6f2] prose-pre:p-4 prose-code:text-sm">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                p: ({ children }) => (
+                                  <p className="mb-2 last:mb-0">{children}</p>
+                                ),
+                                table: ({ children }) => (
+                                  <div className="my-2 overflow-auto">
+                                    <table className="w-full border-collapse rounded-xl border border-[#e6dfd6] text-sm">
+                                      {children}
+                                    </table>
+                                  </div>
+                                ),
+                                th: ({ children }) => (
+                                  <th className="border border-[#e6dfd6] bg-[#faf8f4] px-3 py-2 text-left">
+                                    {children}
+                                  </th>
+                                ),
+                                td: ({ children }) => (
+                                  <td className="border border-[#e6dfd6] px-3 py-2">
+                                    {children}
+                                  </td>
+                                ),
+                              }}
+                            >
+                              {message.content}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <p className="text-sm leading-7">{message.content}</p>
+                        )}
+
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                          {message.source ? (
+                            <div className="text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
+                              Source: {message.source}
+                            </div>
+                          ) : null}
+
+                          {VOICE_ASSISTANT_ENABLED && message.role === "bot" ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="rounded-full border-[#d9e3ff] bg-[#edf2ff] text-[#2748b7] hover:bg-[#e5ecff]"
+                              aria-label={
+                                isAudioPlaying
+                                  ? "Stop audio playback"
+                                  : "Listen to AI response"
+                              }
+                              aria-pressed={isAudioPlaying}
+                              disabled={isAudioLoading}
+                              onClick={() =>
+                                void handleListen(index, message.content)
+                              }
+                            >
+                              {isAudioLoading ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              ) : isAudioPlaying ? (
+                                <Square className="mr-2 h-4 w-4" />
+                              ) : (
+                                <Volume2 className="mr-2 h-4 w-4" />
+                              )}
+                              {isAudioLoading
+                                ? "Preparing audio"
+                                : isAudioPlaying
+                                  ? "Stop"
+                                  : "Listen"}
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      {message.role === "user" ? (
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#dde3f7] bg-white text-slate-700">
+                          <span className="text-sm font-semibold">
+                            {getInitial(user.firstName || user.username)}
+                          </span>
                         </div>
                       ) : null}
                     </div>
-
-                    {message.role === "user" ? (
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#dde3f7] bg-white text-slate-700">
-                        <span className="text-sm font-semibold">
-                          {getInitial(user.firstName || user.username)}
-                        </span>
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
+                  );
+                })}
 
                 {isLoading ? <LoadingSkeleton /> : null}
-
-                {pendingQuestion ? (
-                  <div className="flex justify-center">
-                    <Button
-                      variant="outline"
-                      className="rounded-full border-[#d9e3ff] bg-[#edf2ff] text-[#2748b7] hover:bg-[#e5ecff]"
-                      onClick={startSupportChat}
-                    >
-                      Chat with Support
-                    </Button>
-                  </div>
-                ) : null}
 
                 <div ref={endRef} />
               </div>
@@ -589,17 +827,6 @@ export default function Home() {
         </div>
       </div>
 
-      {showDirectChat ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#f7f6f2]/85 p-4 backdrop-blur-sm">
-          <DirectChat
-            initialQuestion={pendingQuestion}
-            onClose={() => {
-              setShowDirectChat(false);
-              setPendingQuestion("");
-            }}
-          />
-        </div>
-      ) : null}
     </div>
   );
 }

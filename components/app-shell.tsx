@@ -4,7 +4,7 @@ import Header from "@/components/Landing/header";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
-const HIDDEN_HEADER_PREFIXES = ["/auth", "/admin"];
+const HIDDEN_HEADER_PREFIXES = ["/app", "/auth", "/admin"];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();

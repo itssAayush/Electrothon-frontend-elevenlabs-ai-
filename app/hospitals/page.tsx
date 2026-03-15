@@ -204,7 +204,7 @@ function HospitalsContent() {
   }, [pincode]);
 
   const handleChatClick = (hospitalId: string) => {
-    router.push(`/auth?hospital=${hospitalId}`);
+    router.push(`/app?hospital=${hospitalId}`);
   };
 
   return (

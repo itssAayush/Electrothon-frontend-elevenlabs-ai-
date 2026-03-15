@@ -30,7 +30,7 @@ export default function CTA() {
               asChild
               className="h-14 rounded-full bg-white px-7 text-base font-medium text-slate-950 hover:bg-[#f7f4ed]"
             >
-              <Link href="/auth">
+              <Link href="/app">
                 Experience MedConnect
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
