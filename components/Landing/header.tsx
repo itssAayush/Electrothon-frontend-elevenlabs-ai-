@@ -67,7 +67,7 @@ export default function Header() {
             asChild
             className="h-12 rounded-full border border-[#d9e3ff] bg-[#edf2ff] px-6 text-sm font-medium text-[#2748b7] shadow-[0_12px_28px_rgba(91,110,225,0.12)] hover:bg-[#e5ecff]"
           >
-            <Link href="/auth">
+            <Link href="/app">
               Experience MedConnect
               <ArrowRight className="ml-2 h-4 w-4" />
             </Link>
@@ -117,7 +117,7 @@ export default function Header() {
             asChild
             className="h-12 w-full rounded-full border border-[#d9e3ff] bg-[#edf2ff] text-sm font-medium text-[#2748b7] hover:bg-[#e5ecff]"
           >
-            <Link href="/auth">
+            <Link href="/app">
               Experience MedConnect
               <ArrowRight className="ml-2 h-4 w-4" />
             </Link>
