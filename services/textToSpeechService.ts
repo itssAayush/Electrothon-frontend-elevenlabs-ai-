@@ -12,7 +12,7 @@ export type GeneratedSpeech = {
   cached: boolean;
 };
 
-const DEFAULT_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
 const DEFAULT_MODEL_ID = "eleven_multilingual_v2";
 const DEFAULT_CONTENT_TYPE = "audio/mpeg";
 const CACHE_TTL_MS = 1000 * 60 * 60;
